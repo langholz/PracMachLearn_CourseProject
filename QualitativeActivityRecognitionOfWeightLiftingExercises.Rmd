@@ -1,0 +1,543 @@
+---
+title: "Qualitative Activity Recognition of Weight Lifting Exercises"
+author: "Elmar Langholz"
+date: "June 16, 2015"
+header-includes: \usepackage{graphicx}
+output:
+    html_document:
+        fig_caption: true
+---
+
+```{r setup,echo=FALSE,results='hide',warning=FALSE,message=FALSE}
+enforceInstallAndLoadPackage <- function (package) {
+    if (!(package %in% rownames(installed.packages())) ) {
+        install.packages(package, repos = "http://cran.rstudio.com/")
+    }
+
+    library(package, character.only = TRUE)
+}
+
+enforceInstallAndLoadPackage("plyr")
+enforceInstallAndLoadPackage("reshape2")
+enforceInstallAndLoadPackage("ggplot2")
+enforceInstallAndLoadPackage("pander")
+enforceInstallAndLoadPackage("car")
+enforceInstallAndLoadPackage("caret")
+enforceInstallAndLoadPackage("klaR")
+enforceInstallAndLoadPackage("nnet")
+enforceInstallAndLoadPackage("glmnet")
+enforceInstallAndLoadPackage("MASS")
+enforceInstallAndLoadPackage("gbm")
+enforceInstallAndLoadPackage("TeachingDemos")
+enforceInstallAndLoadPackage("parallel")
+enforceInstallAndLoadPackage("doParallel")
+enforceInstallAndLoadPackage("png")
+enforceInstallAndLoadPackage("grid")
+
+parallelCluster <- makeCluster(detectCores())
+registerDoParallel(parallelCluster)
+```
+
+## Synopsis
+
+  With the [quantified self](https://en.wikipedia.org/wiki/Quantified_Self) movement closing in on average consumers, the amount of devices and sensors available is at an all time high. These devices allow users to collect data and measure themselves over time at a very low cost. One of the areas of interest is tracking and quantifying physical activity. While there are many devices allowing this, few extend quantification to allow understanding of the quality (e.g. how well) of the physical activity that was performed. This analysis makes use of the research performed and data recollected by the [Human Activity Recognition](http://groupware.les.inf.puc-rio.br/) project with the intent of quantifying the quality of weight lifting exercises.
+  
+  Through this research we found that it is possible to classify the quality of weight lifting exercises with a high degree of accuracy (0.9913, with and out-of-sample error of 0.0087) using a random forest model (trained with 52 covariates). As a point in hand, we also were able to benchmark the training time of several algorithms in which we are able to determine that depending on the prediction model the training time differs significantly across the board. Finally, reducing the dimensionality of the data generates improvements in training time.
+
+## Data pre-processing
+
+```{r downloadDataEval,echo=FALSE,results='hide',ref.label="downloadData"}
+```
+```{r loadDataEval,echo=FALSE,results='hide',ref.label="loadData"}
+```
+```{r removeBookkeepingCovariatesEval,echo=FALSE,results='hide',ref.label="removeBookkeepingCovariates"}
+```
+```{r removeCovariatesWithMissingValuesEval,echo=FALSE,results='hide',ref.label="removeCovariatesWithMissingValues"}
+```
+```{r normalizeDataEval,echo=FALSE,results='hide',ref.label="normalizeData"}
+```
+
+  Two data sets were provided. The first is the [actual data set](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) used throughout this research (which does contain labeled classes) while the second is the [qualifying data set](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv) (which [does not contain any classes](#compareTrainingAndQualifyingDataSets)) that is used to grade the model online for the [John Hopkins Data Science specialization](https://www.coursera.org/specialization/jhudatascience/1). We mention this because any processing done on the first should be done on the second.
+
+  The [data set](http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises) is comprised of sensor measurements of [belt, forearm, arm and dumbell](#dataSensorPlacement) for six healthy candidates. The exercises cover a set of 10 repetitions of the unilateral dumbbell [bicep curls](https://en.wikipedia.org/wiki/Biceps_curl) in [five different fashions](#dataClasses). For the remainder of this document we assume that the candidate selection was random and that the sensor measurements have almost no errors.
+  
+  After [downloading](#downloadData) and [loading](#loadData) the data, we note that there are `r as.character(nrow(data))` observations and `r as.character(ncol(data))` columns. Once we [preview the data](#previewData), we can determine that the columns are comprised of several columns with many not available *NA* values and besides that a majority numeric covariates. We can group them as defined in the *Types of covariates table*.
+  
+: Types of covariates
+
++--------------+-------------------------------------------------------------------------+
+| Column type  | Description                                                             |
++==============+=========================================================================+
+| Bookkeeping  | Used to keep track of the records for accounting the observations.      |
+|              | *E.g record number, user name, timestamps, ...*                         |
++--------------+-------------------------------------------------------------------------+
+|              | The [gyroscope](https://en.wikipedia.org/wiki/Gyroscope),               |
+|              | [accelerometer](https://en.wikipedia.org/wiki/Accelerometer),           |
+| Raw          | [magnetometer](https://en.wikipedia.org/wiki/Magnetometer)              |
+|              | x, y, z values and the                                                  |
+|              | [Euler/Tait–Bryan angles](https://en.wikipedia.org/wiki/Euler_angles)   |
+|              | (yaw, pitch, and roll) for the belt, forearm, arm and dumbell sensors.  |
++--------------+-------------------------------------------------------------------------+
+| Processed    | The derived data points measures from the raw data.                     |
+|              | *E.g. max, min, avg, stddev, ...*                                       |
++--------------+-------------------------------------------------------------------------+
+
+  Since we want to build a generalizable statistical model, the [bookkeeping](#removeBookkeepingCovariates) and [predominant not available](#removeCovariatesWithMissingValues) covariates (having more than 40%) are removed. This reduces the amount of covariates from `r as.character(dim(data)[2] - 1)` to `r as.character(dim(filteredData)[2] - 1)`. Finally, we [normalize the data](#normalizeData) by converting the class type `classe` character variable to a factor. 
+
+## Exploratory data analysis
+
+  Due to the sheer amount of variables left, its a bit difficult to recognize any patterns visually by [plotting the covariates by class](#plotCovariatesByClass). Analogously, performing [scatterplot matrices by sensor](#plotScatterplotMatrixBySensor) yields some complex relationships between each covariate pair and for which I suspect these are better ways to visualize these by using 3D scatterplots. However, since the intent of this research is to focus on prediction instead of modeling, we will leave it to the reader as an exercise.
+  
+  Ultimately, we perform a [variance diagnosis](#covariatesWithZeroOrNearZeroVariance) on the data with the intent to determine which covariates have zero o near zero variance. For which we would likely remove these variables since they wouldn't provide any value. Nonetheless, none of these need to be removed since none comply.
+
+## Statistical prediction/modeling
+
+```{r sliceDataEval,echo=FALSE,results='hide',ref.label="sliceData"}
+```
+
+  In order to perform prediction, we first [slice the data](#sliceData) in order to be able perform [cross-validation](https://en.wikipedia.org/wiki/Cross-validation_(statistics)) since we will be evaluating the accuracy of multiple prediction models and choosing the one with the highest accuracy. Due to this, we split the data as follows:
+  
+: Data slicing strategy
+
++------------+--------+-----------------------------------------------+
+| Data slice | Amount | Description                                   |
++============+========+===============================================+
+| Training   | 60%    | Used to build the different prediction models |
++------------+--------+-----------------------------------------------+
+| Testing    | 20%    | Used to estimate the accuracy of the          |
+|            |        | constructed prediction model with the intent  |
+|            |        | of selecting the best model                   |
++------------+--------+-----------------------------------------------+
+| Validation | 20%    | Used to determine the out of sample error of  |
+|            |        | the best model                                |
++------------+--------+-----------------------------------------------+
+
+```{r modelAsNaiveBayesEval,echo=FALSE,results='hide',ref.label="modelAsNaiveBayes",warning=FALSE,cache=TRUE}
+```
+```{r modelAsLinearDiscriminantAnalysisEval,echo=FALSE,results='hide',ref.label="modelAsLinearDiscriminantAnalysis",warning=FALSE,cache=TRUE}
+```
+```{r modelAsGeneralizedLinearModelEval,echo=FALSE,results='hide',ref.label="modelAsGeneralizedLinearModel",warning=FALSE,cache=TRUE}
+```
+```{r modelAskNNEval,echo=FALSE,results='hide',ref.label="modelAskNN",warning=FALSE,cache=TRUE}
+```
+```{r modelAsDecisionTreeEval,echo=FALSE,results='hide',ref.label="modelAsDecisionTree",warning=FALSE,cache=TRUE}
+```
+```{r modelAsRandomForestEval,echo=FALSE,results='hide',ref.label="modelAsRandomForest",warning=FALSE,cache=TRUE}
+```
+```{r modelAsBoostingEval,echo=FALSE,results='hide',ref.label="modelAsBoosting",warning=FALSE,cache=TRUE}
+```
+
+```{r modelData,echo=FALSE}
+accuracy <- data.frame(nb = round(nbConfusionMatrix$overall[1], 4),
+                       lda = round(ldaConfusionMatrix$overall[1], 4),
+                       glm = round(glmnetConfusionMatrix$overall[1], 4),
+                       knn = round(knnConfusionMatrix$overall[1], 4),
+                       rpart = round(rpartConfusionMatrix$overall[1], 4),
+                       rf = round(rfConfusionMatrix$overall[1], 4),
+                       gbm = round(gbmConfusionMatrix$overall[1], 4))
+accuracyCI <- data.frame(nbLow = round(nbConfusionMatrix$overall[3], 4),
+                         nbHi = round(nbConfusionMatrix$overall[4], 4),
+                         ldaLow = round(ldaConfusionMatrix$overall[3], 4),
+                         ldaHi = round(ldaConfusionMatrix$overall[4], 4),
+                         glmLow = round(glmnetConfusionMatrix$overall[3], 4),
+                         glmHi = round(glmnetConfusionMatrix$overall[4], 4),
+                         knnLow = round(knnConfusionMatrix$overall[3], 4),
+                         knnHi = round(knnConfusionMatrix$overall[4], 4),
+                         rpartLow = round(rpartConfusionMatrix$overall[3], 4),
+                         rpartHi = round(rpartConfusionMatrix$overall[4], 4),
+                         rfLow = round(rfConfusionMatrix$overall[3], 4),
+                         rfHi = round(rfConfusionMatrix$overall[4], 4),
+                         gbmLow = round(gbmConfusionMatrix$overall[3], 4),
+                         gbmHi = round(gbmConfusionMatrix$overall[4], 4))
+time <- data.frame(nb = nbTrainingTime[3],
+                   lda = ldaTrainingTime[3],
+                   glm = glmnetTrainingTime[3],
+                   knn = knnTrainingTime[3],
+                   rpart = rpartTrainingTime[3],
+                   rf = rfTrainingTime[3],
+                   gbm = gbmTrainingTime[3])
+model <- c(pandoc.link.return("#modelAsNaiveBayes", "Naive bayes"),
+           pandoc.link.return("#modelAsLinearDiscriminantAnalysis", "LDA"),
+           pandoc.link.return("#modelAsGeneralizedLinearModel", "GLM"),
+           pandoc.link.return("#modelAskNN", "kNN"),
+           pandoc.link.return("#modelAsDecisionTree", "Decision Tree"),
+           pandoc.link.return("#modelAsRandomForest", "Random forest"),
+           pandoc.link.return("#modelAsBoosting", "GBM"))
+a <- c(accuracy$nb, accuracy$lda, accuracy$glm, accuracy$knn, accuracy$rpart, accuracy$rf, accuracy$gbm)
+aci <- c(paste0("(", accuracyCI$nbLow, ",", accuracyCI$nbHi,")"),
+         paste0("(", accuracyCI$ldaLow, ",", accuracyCI$ldaHi,")"),
+         paste0("(", accuracyCI$glmLow, ",", accuracyCI$glmHi,")"),
+         paste0("(", accuracyCI$knnLow, ",", accuracyCI$knnHi,")"),
+         paste0("(", accuracyCI$rpartLow, ",", accuracyCI$rpartHi,")"),
+         paste0("(", accuracyCI$rfLow, ",", accuracyCI$rfHi,")"),
+         paste0("(", accuracyCI$gbmLow, ",", accuracyCI$gbmHi,")"))
+t <- c(time$nb, time$lda, time$glm, time$knn, time$rpart, time$rf, time$gbm)
+accuracyBenchmarkTable <- data.frame(Model = model, Accuracy = a, AccuracyCI = aci)
+timeBenchmarkTable <- data.frame(Model = model, ElapsedTime = t)
+```
+
+  Seven different prediction models where constructed and benchmarked regarding time and accuracy and the results are the ones depicted the by the tables below.
+
+```{r accuracyBenchmarkTable,echo=FALSE,results='asis'}
+pandoc.table(accuracyBenchmarkTable, caption = "Accuracy benchmark")
+```
+
+```{r timeBenchmarkTable,echo=FALSE,results='asis'}
+pandoc.table(timeBenchmarkTable, caption = "Time benchmark")
+```
+
+The **random forest** model had the highest accuracy. However, the downside of this is that the amount of time used to train the model was relatively high. The figure below shows the detected variable importance by:
+
+```{r plotRandomForestVariableImportance,echo=FALSE,fig.width=6,fig.height=7,fig.cap="Random forest variable importance",fig.align='center',warning=FALSE,message=FALSE}
+plot(varImp(rfFit))
+```
+
+```{r compressDataEval,echo=FALSE,results='hide',ref.label="compressData",warning=FALSE,cache=TRUE}
+```
+```{r modelAsRandomForestWithPCAEval,echo=FALSE,results='hide',ref.label="modelAsRandomForestWithPCA",warning=FALSE,cache=TRUE}
+```
+
+  In order to reduce the amount of time spent training we [compress the data](#compressData) by using [principal component analysis](https://en.wikipedia.org/wiki/Principal_component_analysis). This lead to `r trainCompression$numComp` components which capture 95% of the variance and after rerunning the random forest model using the compressed data an accuracy of `r as.character(round(rfWithPCAConfusionMatrix$overall[1], 4))` with a 95% confidence interval of (`r as.character(round(rfWithPCAConfusionMatrix$overall[3], 4))`, `r as.character(round(rfWithPCAConfusionMatrix$overall[4], 4))`). As we can see both the accuracy was reduced by `r accuracy$rf - round(rfWithPCAConfusionMatrix$overall[1], 4)` and the training time to `r as.character(rfWithPCATrainingTime[3])` seconds. The variable importance for this model is as follows:
+  
+```{r plotRandomForestWithCompressionVariableImportance,echo=FALSE,fig.width=4,fig.height=4,fig.cap="Random forest with variable compression importance",fig.align='center'}
+plot(varImp(rfWithPCAFit))
+```
+
+## Conclusion
+
+```{r randomForestCrossValidationEval,echo=FALSE,results='hide',ref.label="randomForestCrossValidation"}
+```
+```{r randomForestWithPCACrossValidationEval,echo=FALSE,results='hide',ref.label="randomForestWithPCACrossValidation"}
+```
+
+  Since we are interested in accuracy, the best model was the random forest prediction model (without data compression) trained using `r as.character(dim(filteredData)[2] - 1)` covariates. It has an accuracy of `r as.character(round(rfValidationConfusionMatrix$overall[1], 4))` with and out-of-sample error of `r as.character(round(1 - rfValidationConfusionMatrix$overall[1], 4))`. The accuracy and out-of-sample error values were [obtained](#randomForestCrossValidation) by evaluating the previously unused validation data set instead of the test data set used to compare the other models. Finally, we are able to depict the accuracy through the below confusion heatmap:
+  
+```{r confusionHeatmap,echo=FALSE,fig.width=5,fig.height=5,fig.cap="Confusion heatmap",fig.align='center'}
+validationAccuracyMatrix <- as.matrix(rfValidationConfusionMatrix)
+validationAccuracyMatrix <- round(apply(validationAccuracyMatrix, 2, function (x) x / sum(x)), 4)
+levelplot(validationAccuracyMatrix,
+          panel = function (...) {
+              panel.levelplot(...)
+              panel.text(x = rep(1:5, each = 5),
+                         y = rep(1:5, 5),
+                         labels = as.character(validationAccuracyMatrix),
+                         col = ifelse(validationAccuracyMatrix > 0.8, "white", "gray"))
+          },
+          col.regions = rgb(0, 0, seq(0.8, 0, -0.01)),
+          xlab = "Prediction",
+          ylab = "Actual")
+```
+
+## Appendix
+
+### 1. Data set details {#dataSetDetails}
+
+#### 1.1 Sensor placement {#dataSensorPlacement}
+
+```{r sensorPlacementImage,echo=FALSE,fig.width=2,fig.height=4,fig.cap="Sensors body placement",fig.align='center'}
+sensorPlacementImageUrl <- "http://groupware.les.inf.puc-rio.br/static/WLE/on-body-sensing-schema.png"
+sensorPlacementImagePath <- downloadDataIfNotPresent(sensorPlacementImageUrl)
+sensorPlacementImage <- readPNG(sensorPlacementImagePath)
+grid.raster(sensorPlacementImage)
+```
+
+#### 1.2 Unilateral Dumbbell Biceps curl classes {#dataClasses}
+
+: Unilateral Dumbbell Biceps Curl classes
+
++--------+------------------------------------------+------------+
+| Class  | Description                              | Type       |
++========+==========================================+============+
+|   A    | Exactly according to the specification   | Correct    |
++--------+------------------------------------------+------------+
+|   B    | Throwing the elbows to the front         | Error I    |
++--------+------------------------------------------+------------+
+|   C    | Lifting the dumbbell only halfway        | Error II   |
++--------+------------------------------------------+------------+
+|   D    | Lowering the dumbbell only halfway       | Error III  |
++--------+------------------------------------------+------------+
+|   E    | Throwing the hips to the front           | Error IV   |
++--------+------------------------------------------+------------+
+
+### 2. Download data {#downloadData}
+
+```{r downloadData,echo=TRUE,eval=FALSE}
+downloadDataIfNotPresent <- function (url) {
+    filePath <- paste0("./", basename(url))
+    if (!file.exists(filePath)) { download.file(url, filePath, method = "curl") }
+    filePath
+}
+
+setupData <- function (urls) {
+    filePaths <- vapply(urls, downloadDataIfNotPresent, FUN.VALUE = character(1))
+    filePaths
+}
+
+urls <- c("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+          "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+filePaths <- setupData(urls)
+```
+
+### 3. Loading data {#loadData}
+
+```{r loadData,echo=TRUE,eval=FALSE}
+data <- read.csv(filePaths[1], na.strings = c("NA", "", "#DIV/0!"), stringsAsFactors = F)
+qualify <- read.csv(filePaths[2], na.strings = c("NA", "", "#DIV/0!"), stringsAsFactors = F)
+```
+
+### 4. Preview data {#previewData}
+
+```{r previewData,echo=TRUE,eval=FALSE}
+str(data); str(qualify)
+summary(data); summary(qualify)
+```
+
+### 5. Compare training and qualifying data set column names {#compareTrainingAndQualifyingDataSets}
+
+```{r compareTrainingAndTestingDataSets,echo=TRUE,eval=TRUE}
+diffColumnNameIndexes <- which(!(names(qualify) %in% names(data)))
+names(data)[diffColumnNameIndexes]; names(qualify)[diffColumnNameIndexes]
+qualify <- qualify[, !(names(qualify) %in% "problem_id")]
+```
+
+### 6. Remove bookkeeping covariates {#removeBookkeepingCovariates} 
+
+```{r removeBookkeepingCovariates,echo=TRUE,eval=FALSE}
+suppressedCovariateNames <- c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2",
+                              "cvtd_timestamp", "new_window", "num_window")
+filteredData <- data[, !(names(data) %in% c(suppressedCovariateNames))]
+qualify <- qualify[, !(names(qualify) %in% c(suppressedCovariateNames))]
+```
+
+### 7. Remove covariates with too many missing values {#removeCovariatesWithMissingValues}
+
+```{r removeCovariatesWithMissingValues,echo=TRUE,eval=FALSE}
+covariateNARatio <- apply(filteredData[, !(names(filteredData) %in% c("classe"))],
+                          2,
+                          function (col, observationCount) { sum(is.na(col)) / observationCount },
+                          dim(data)[1])
+suppressedCovariateNames <- c(suppressedCovariateNames,
+                              names(covariateNARatio)[which(covariateNARatio > 0.40)])
+filteredData <- filteredData[, !(names(filteredData) %in% c(suppressedCovariateNames))]
+qualify <- qualify[, !(names(qualify) %in% c(suppressedCovariateNames))]
+```
+
+### 8. Normalize data {#normalizeData}
+
+```{r normalizeData,echo=TRUE,eval=FALSE}
+filteredData$classe <- factor(filteredData$classe)
+```
+
+### 9. Boxplots of covariates by class {#plotCovariatesByClass}
+
+```{r plotCovariatesByClass,echo=TRUE,eval=FALSE}
+meltedData <- melt(filteredData, id = "classe")
+classes <- c("A", "B", "C", "D", "E")
+boxplotCovariatesByClass <- function (class, meltedData) {
+    classData <- meltedData[which(meltedData$classe == class), ]
+    plot <- ggplot(classData)
+    plot <- plot + geom_boxplot(aes(x = variable, y = value))
+    plot <- plot + facet_grid(. ~ classe)
+    plot <- plot + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    plot
+}
+boxplots <- lapply(classes, boxplotCovariatesByClass, meltedData)
+boxplots
+```
+
+### 10. Scatterplot matrices by sensor {#plotScatterplotMatrixBySensor}
+
+```{r plotScatterplotMatrixBySensor,echo=TRUE,eval=FALSE}
+sensors <- c("_forearm", "_arm", "_dumbbell", "_belt")
+scatterplotMatrixBySensor <- function (sensor, data, names) {
+    indices <- c(which(grepl(sensor, names)), which(grepl("classe", names)))
+    sensorData <- data[, indices]
+    scatterplotMatrix(sensorData)
+}
+lapply(sensors, scatterplotMatrixBySensor, filteredData, names(filteredData))
+```
+
+### 11. Covariates with zero or near zero variance {#covariatesWithZeroOrNearZeroVariance}
+
+```{removeCovariatesWithZeroOrNearZeroVariance,echo=TRUE,eval=FALSE}
+covariateVariance <- nearZeroVar(
+    filteredData[, !(names(filteredData) %in% c("classe"))],
+    saveMetrics = TRUE)
+zeroOrNearZeroVarIndices <- which(covariateVariance$zeroVar | covariateVariance$nzv)
+```
+
+### 12. Slice data set {#sliceData}
+
+```{r sliceData,echo=TRUE,eval=TRUE}
+char2seed("d[o_0]b")
+dataSetIndices <- createDataPartition(filteredData$classe, p = 3 / 5, list = F)
+train <- filteredData[dataSetIndices, ]
+crossValidation <- filteredData[-dataSetIndices, ]
+testSetIndices <- createDataPartition(crossValidation$classe, p = 1 / 2, list = F)
+test <- crossValidation[testSetIndices, ]
+validation <- crossValidation[-testSetIndices, ]
+```
+
+### 13. Data compression using Principal Component Analysis {#compressData}
+
+```{r compressData,echo=TRUE,eval=FALSE}
+trainCompression <- preProcess(train[, !(names(train) %in% c("classe"))],
+                               method = c("BoxCox", "center", "scale", "pca"),
+                               thresh = 0.95)
+trainWithCompression <- predict(trainCompression, train[, !(names(train) %in% c("classe"))])
+testWithCompression <- predict(trainCompression, test[, !(names(test) %in% c("classe"))])
+validationWithCompression <- predict(trainCompression, validation[, !(names(validation) %in% c("classe"))])
+qualifyWithCompression <- predict(trainCompression, qualify[, !(names(qualify) %in% c("problem_id"))])
+```
+
+### 14. Naive bayes model {#modelAsNaiveBayes}
+
+```{r modelAsNaiveBayes,echo=TRUE,eval=FALSE,warning=FALSE,cache=TRUE}
+char2seed("d[o_0]b")
+nbStartTime <- proc.time()
+nbFit <- train(classe ~ ., method = "nb", data = train)
+nbTrainingTime <- proc.time() - nbStartTime
+nbFitPrediction <- predict(nbFit, test)
+nbConfusionMatrix <- confusionMatrix(nbFitPrediction, test$classe)
+```
+```{r modelAsNaiveBayesResults,echo=FALSE,eval=TRUE}
+nbTrainingTime
+nbConfusionMatrix
+```
+
+### 15. Linear discriminant analysis model {#modelAsLinearDiscriminantAnalysis}
+
+```{r modelAsLinearDiscriminantAnalysis,echo=TRUE,eval=FALSE,warning=FALSE,cache=TRUE}
+char2seed("d[o_0]b")
+ldaStartTime <- proc.time()
+ldaFit <- train(classe ~ ., method = "lda", data = train)
+ldaTrainingTime <- proc.time() - ldaStartTime
+ldaFitPrediction <- predict(ldaFit, test)
+ldaConfusionMatrix <- confusionMatrix(ldaFitPrediction, test$classe)
+```
+```{r modelAsLinearDiscriminantAnalysisResults,echo=FALSE,eval=TRUE}
+ldaTrainingTime
+ldaConfusionMatrix
+```
+
+### 16. Generlized linear model {#modelAsGeneralizedLinearModel}
+
+```{r modelAsGeneralizedLinearModel,echo=TRUE,eval=FALSE,warning=FALSE,cache=TRUE}
+char2seed("d[o_0]b")
+glmnetStartTime <- proc.time()
+glmnetFit <- train(classe ~ ., method = "glmnet", data = train,
+                   tuneGrid = expand.grid(.alpha= seq(0, 1, 0.5), .lambda = 0:30 / 10))
+glmnetTrainingTime <- proc.time() - glmnetStartTime
+glmnetFitPrediction <- predict(glmnetFit, test)
+glmnetConfusionMatrix <- confusionMatrix(glmnetFitPrediction, test$classe)
+```
+```{r modelAsGeneralizedLinearModelResults,echo=FALSE,eval=TRUE}
+glmnetTrainingTime
+glmnetConfusionMatrix
+```
+
+### 17. K-Nearest Neighbour model {#modelAskNN}
+
+```{r modelAskNN,echo=TRUE,eval=FALSE,warning=FALSE,cache=TRUE}
+char2seed("d[o_0]b")
+knnStartTime <- proc.time()
+knnFit <- train(classe ~ ., method = "knn", data = train)
+knnTrainingTime <- proc.time() - knnStartTime
+knnFitPrediction <- predict(knnFit, test)
+knnConfusionMatrix <- confusionMatrix(knnFitPrediction, test$classe)
+```
+```{r modelAskNNResults,echo=FALSE,eval=TRUE}
+knnTrainingTime
+knnConfusionMatrix
+```
+
+### 18. Decision tree model {#modelAsDecisionTree}
+
+```{r modelAsDecisionTree,echo=TRUE,eval=FALSE,warning=FALSE,cache=TRUE}
+char2seed("d[o_0]b")
+rpartStartTime <- proc.time()
+rpartFit <- train(classe ~ ., method = "rpart", data = train)
+rpartTrainingTime <- proc.time() - rpartStartTime
+rpartFitPrediction <- predict(rpartFit, test)
+rpartConfusionMatrix <- confusionMatrix(rpartFitPrediction, test$classe)
+```
+```{r modelAsDecisionTreeResults,echo=FALSE,eval=TRUE}
+rpartTrainingTime
+rpartConfusionMatrix
+```
+
+### 19. Random forest model {#modelAsRandomForest}
+
+```{r modelAsRandomForest,echo=TRUE,eval=FALSE,warning=FALSE,cache=TRUE}
+char2seed("d[o_0]b")
+rfStartTime <- proc.time()
+rfFit <- train(classe ~ ., method = "rf", data = train)
+rfTrainingTime <- proc.time() - rfStartTime
+rfFitPrediction <- predict(rfFit, test)
+rfConfusionMatrix <- confusionMatrix(rfFitPrediction, test$classe)
+```
+```{r modelAsRandomForestResults,echo=FALSE,eval=TRUE}
+rfTrainingTime
+rfConfusionMatrix
+```
+
+### 20. Generalized boosted regression model {#modelAsBoosting}
+
+```{r modelAsBoosting,echo=TRUE,eval=FALSE,warning=FALSE,cache=TRUE}
+char2seed("d[o_0]b")
+gbmStartTime <- proc.time()
+gbmFit <- train(classe ~ ., method="gbm", data = train, verbose = F)
+gbmTrainingTime <- proc.time() - gbmStartTime
+gbmFitPrediction <- predict(gbmFit, test)
+gbmConfusionMatrix <- confusionMatrix(gbmFitPrediction, test$classe)
+```
+```{r modelAsBoostingResults,echo=FALSE,eval=TRUE}
+gbmTrainingTime
+gbmConfusionMatrix
+```
+
+### 21. Random forest regression model with compressed data {#modelAsRandomForestWithPCA}
+
+```{r modelAsRandomForestWithPCA,echo=TRUE,eval=FALSE,warning=FALSE,cache=TRUE}
+char2seed("d[o_0]b")
+rfWithPCAStartTime <- proc.time()
+rfWithPCAFit <- train(train$classe ~ ., method = "rf", data = trainWithCompression)
+rfWithPCATrainingTime <- proc.time() - rfWithPCAStartTime
+rfWithPCAFitPrediction <- predict(rfWithPCAFit, testWithCompression)
+rfWithPCAConfusionMatrix <- confusionMatrix(rfWithPCAFitPrediction, test$classe)
+```
+```{r modelAsRandomForestWithPCAResults,echo=FALSE,eval=TRUE}
+rfWithPCATrainingTime
+rfWithPCAConfusionMatrix
+```
+
+### 22. Random forest cross-validation {#randomForestCrossValidation}
+
+```{r randomForestCrossValidation,echo=TRUE,eval=FALSE}
+rfValidationPrediction <- predict(rfFit, validation)
+rfValidationConfusionMatrix <- confusionMatrix(rfValidationPrediction, validation$classe)
+```
+
+### 23. Random forest with compression cross-validation {#randomForestWithPCACrossValidation}
+
+```{r randomForestWithPCACrossValidation,echo=TRUE,eval=FALSE}
+rfValidationWithPCAPrediction <- predict(rfWithPCAFit, validationWithCompression)
+rfValidationWithPCAConfusionMatrix <- confusionMatrix(rfValidationWithPCAPrediction, validation$classe)
+```
+
+### 24. Qualification results {#qualificationResults}
+
+```{r qualificationResults,echo=TRUE}
+writePredictions <- function (results) {
+    fileWrite <- function (index, r) {
+        fileName <- paste0("./problem_id_", index, ".txt")
+        write.table(r[index], file = fileName, quote = F, row.names = F, col.names = F)
+        fileName
+    }
+    filePaths <- vapply(1:length(results), fileWrite, FUN.VALUE = character(1), results)
+    filePaths
+}
+
+results <- predict(rfFit, qualify)
+filePaths <- writePredictions(results)
+```
